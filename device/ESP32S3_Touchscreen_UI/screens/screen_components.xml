@@ -1,0 +1,20 @@
+<screen permanent="true">
+	<view extends="lv_obj">
+		<style name="style_screen_light" />
+		<bind_style name="style_screen_dark" subject="subject_theme_dark" ref_value="1" />
+		<style name="style_scrollbar" selector="scrollbar" />
+
+		<column name="content" width="236" height="316" pad="#space_lg" gap="#space_md" x="2" y="2" />
+		<base_box name="base_box_1" width="239" height="319">
+			<image name="cam_feed" ignore_layout="true" x="0" y="24" width="239" height="240" />
+
+			<button name="capture_img" ignore_layout="true" x="17" y="270" text="Capture" icon="icon_camera">
+				<event_cb callback="capture_img_callback" trigger="clicked" />
+			</button>
+
+			<button name="wifi_reroute" ignore_layout="true" x="137" y="270" text="WiFi" icon="icon_wifi">
+				<event_cb callback="wifi_reroute_callback" trigger="clicked" />
+			</button>
+		</base_box>
+	</view>
+</screen>

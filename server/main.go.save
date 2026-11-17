@@ -1,0 +1,863 @@
+
+import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+type OllamaRequest struct {
+	Model    string          `json:"model"`
+	Messages []Message       `json:"messages"`
+	Stream   bool            `json:"stream"`
+	Format   json.RawMessage `json:"format,omitempty"`
+}
+
+type Message struct {
+	Role    string   `json:"role"`
+	Content string   `json:"content"`
+	Images  []string `json:"images,omitempty"`
+}
+
+type OllamaResponse struct {
+	Message Message `json:"message"`
+}
+
+type Receipt struct {
+	Store string  `json:"store"`
+	Date  string  `json:"date"`
+	Items []Item  `json:"items"`
+	Total float64 `json:"total"`
+}
+
+type Item struct {
+	Name     string  `json:"name"`
+	Quantity int     `json:"quantity"`
+	Price    float64 `json:"price"`
+}
+
+type APIResponse struct {
+	Status  string   `json:"status"`
+	Message string   `json:"message,omitempty"`
+	Receipt *Receipt `json:"receipt,omitempty"`
+	Bytes   int      `json:"bytes,omitempty"`
+	Error   string   `json:"error,omitempty"`
+	Path    string   `json:"path,omitempty"`
+}
+
+// ============================================
+// HTTP API HANDLERS
+// ============================================
+
+func receiptHandler(w http.ResponseWriter, r *http.Request) {
+	// ============================================
+	// AUTHENTICATION
+	// ============================================
+
+	token := os.Getenv("RECEIPT_API_TOKEN")
+
+	if token == "" {
+		jsonResponse(w, http.StatusInternalServerError, APIResponse{
+			Status: "error",
+			Error:  "Server authentication is not configured",
+		})
+		return
+	}
+
+	if r.Header.Get("Authorization") != "Bearer "+token {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+
+		jsonResponse(w, http.StatusUnauthorized, APIResponse{
+			Status: "error",
+			Error:  "Unauthorized",
+		})
+		return
+	}
+
+	// ============================================
+	// HTTP METHOD VALIDATION
+	// ============================================
+
+	if r.Method != http.MethodPost {
+		jsonResponse(w, http.StatusMethodNotAllowed, APIResponse{
+			Status: "error",
+			Error:  "Method not allowed. Use POST",
+		})
+		return
+	}
+
+	// ============================================
+	// RAW JPEG UPLOAD
+	// ============================================
+
+	defer r.Body.Close()
+
+	contentType := strings.TrimSpace(
+		strings.Split(r.Header.Get("Content-Type"), ";")[0],
+	)
+
+	if !strings.EqualFold(contentType, "image/jpeg") {
+		jsonResponse(w, http.StatusUnsupportedMediaType, APIResponse{
+			Status: "error",
+			Error:  "Expected Content-Type: image/jpeg",
+		})
+		return
+	}
+
+	// Maximum JPEG size: 2 MB
+	const maxJPEGBytes int64 = 2 * 1024 * 1024
+
+	imageData, err := io.ReadAll(
+		http.MaxBytesReader(w, r.Body, maxJPEGBytes),
+	)
+
+	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+
+		if errors.As(err, &maxBytesErr) {
+			jsonResponse(w, http.StatusRequestEntityTooLarge, APIResponse{
+				Status: "error",
+				Error:  "JPEG exceeds maximum size of 2 MB",
+			})
+			return
+		}
+
+		jsonResponse(w, http.StatusBadRequest, APIResponse{
+			Status: "error",
+			Error:  "Failed to read JPEG: " + err.Error(),
+		})
+		return
+	}
+
+	// ============================================
+	// IMAGE VALIDATION
+	// ============================================
+
+	if len(imageData) == 0 {
+		jsonResponse(w, http.StatusBadRequest, APIResponse{
+			Status: "error",
+			Error:  "Empty JPEG data",
+		})
+		return
+	}
+
+	// JPEG files begin with the signature FF D8 FF
+	if len(imageData) < 3 ||
+		!bytes.HasPrefix(imageData, []byte{0xFF, 0xD8, 0xFF}) {
+
+		jsonResponse(w, http.StatusBadRequest, APIResponse{
+			Status: "error",
+			Error:  "Invalid JPEG image signature",
+		})
+		return
+	}
+
+	fmt.Printf(
+		"[%s] Received JPEG: %d bytes\n",
+		time.Now().Format("15:04:05"),
+		len(imageData),
+	)
+
+
+	// ============================================
+	// PROCESS WITH OLLAMA
+	// ============================================
+
+	receipt, err := processReceipt(imageData)
+
+	if err != nil {
+		fmt.Printf(
+			"[%s] Error processing: %v\n",
+			time.Now().Format("15:04:05"),
+			err,
+		)
+
+		jsonResponse(w, http.StatusInternalServerError, APIResponse{
+			Status: "error",
+			Error:  "Failed to process receipt: " + err.Error(),
+		})
+		return
+	}
+
+	fmt.Printf(
+		"[%s] Successfully processed receipt from: %s\n",
+		time.Now().Format("15:04:05"),
+		receipt.Store,
+	)
+
+	// ============================================
+	// SAVE RECEIPT TO DISK
+	// ============================================
+
+	receiptPath, err := saveReceipt(receipt)
+
+	if err != nil {
+		fmt.Printf(
+			"[%s] Error saving receipt: %v\n",
+			time.Now().Format("15:04:05"),
+			err,
+		)
+
+		jsonResponse(w, http.StatusInternalServerError, APIResponse{
+			Status:  "error",
+			Error:   "Receipt processed but failed to save: " + err.Error(),
+			Receipt: &receipt,
+		})
+		return
+	}
+
+	fmt.Printf(
+		"[%s] Receipt saved to: %s\n",
+		time.Now().Format("15:04:05"),
+		receiptPath,
+	)
+
+	// ============================================
+	// SUCCESS RESPONSE
+	// ============================================
+
+	jsonResponse(w, http.StatusOK, APIResponse{
+		Status:  "success",
+		Message: "Receipt processed and saved successfully",
+		Receipt: &receipt,
+		Bytes:   len(imageData),
+		Path:    receiptPath,
+	})
+}
+
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	jsonResponse(w, http.StatusOK, APIResponse{
+		Status:  "ok",
+		Message: "Receipt scanner API is running",
+	})
+}
+
+func jsonResponse(w http.ResponseWriter, status int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(data)
+}
+
+// ============================================
+// SAVE RECEIPT TO DISK
+// ============================================
+
+func saveReceipt(receipt Receipt) (string, error) {
+	// Create directory based on receipt date
+	date, err := time.Parse("2006-01-02", receipt.Date)
+	if err != nil {
+		return "", fmt.Errorf("invalid receipt date %q: %w", receipt.Date, err)
+	}
+
+	// Use absolute path for reliable storage
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	baseDir := filepath.Join(
+		homeDir,
+		"Spending-tracker",
+		"data",
+		"receipts",
+	)
+
+	dir := filepath.Join(
+		baseDir,
+		date.Format("2006"),
+		date.Format("01"),
+	)
+
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create receipt directory: %w", err)
+	}
+
+	// Use nanosecond timestamp to avoid filename collisions
+	filename := fmt.Sprintf(
+		"%s_%d.json",
+		receipt.Date,
+		time.Now().UnixNano(),
+	)
+
+	path := filepath.Join(dir, filename)
+
+	data, err := json.MarshalIndent(receipt, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("failed to encode receipt as JSON: %w", err)
+	}
+
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return "", fmt.Errorf("failed to write receipt file: %w", err)
+	}
+
+	return path, nil
+}
+
+// ============================================
+// RECEIPT PROCESSING
+// ============================================
+
+func processReceipt(imageData []byte) (Receipt, error) {
+	imageBase64 := base64.StdEncoding.EncodeToString(imageData)
+
+	// ============================================================
+	// PASS 1: LITERAL OCR
+	// ============================================================
+
+	ocrPrompt := `
+Perform literal OCR on this Bulgarian receipt.
+
+Transcribe ONLY text that is visibly present.
+
+Rules:
+- Copy Bulgarian Cyrillic exactly.
+- Do not translate.
+- Do not correct spelling.
+- Do not guess missing characters.
+- Do not invent text.
+- Preserve numbers and decimal values exactly.
+- Preserve the order and line structure.
+- Copy product names exactly as printed.
+- Copy quantity/unit-price lines exactly.
+- Do not interpret or calculate anything.
+- If a character cannot be read, use ?.
+
+Return ONLY the transcribed receipt text.
+No JSON.
+No Markdown.
+No explanation.
+`
+
+	ocrText, err := callOllamaVision(
+		"qwen2.5vl-receipt",
+		ocrPrompt,
+		imageBase64,
+	)
+
+	if err != nil {
+		return Receipt{}, fmt.Errorf("OCR pass failed: %w", err)
+	}
+
+	fmt.Println()
+	fmt.Println("===== RAW OCR =====")
+	fmt.Println(ocrText)
+	fmt.Println("===================")
+
+	// ============================================================
+	// PASS 2: STRUCTURE THE OCR
+	// ============================================================
+
+	structurePrompt := fmt.Sprintf(`
+You are a receipt data extraction engine.
+
+You are given OCR text from a Bulgarian Lidl receipt.
+
+Your job is to convert ONLY the information present in that OCR text
+into structured JSON.
+
+IMPORTANT:
+
+DO NOT perform OCR yourself.
+
+DO NOT invent missing text.
+
+DO NOT correct spelling.
+
+DO NOT "fix" product names.
+
+DO NOT replace strange-looking Bulgarian words with words that seem
+more likely.
+
+The OCR text is authoritative.
+
+If the OCR says a product name is:
+
+Мяка питка
+
+then the product name MUST remain:
+
+Мяка питка
+
+even if you think this is unusual.
+
+Do NOT change it to something you think is more reasonable.
+
+============================================================
+RECEIPT RULES
+============================================================
+
+STORE:
+
+Extract the store name from the OCR text.
+
+DATE:
+
+Find the printed receipt date.
+
+The receipt normally contains a date in:
+
+DD.MM.YYYY HH:MM:SS
+
+Convert ONLY that date to:
+
+YYYY-MM-DD
+
+Do not invent a date.
+
+ITEMS:
+
+Extract each actual purchased product.
+
+A product-name line represents one purchased item.
+
+Lines such as:
+
+12.000 x 0.59
+2.000 x 1.89
+2.000 x 1.49
+
+are NOT separate products.
+
+They are supporting quantity/unit-price information belonging to
+the product above them.
+
+PRICE:
+
+Use the FINAL PRICE of the product.
+
+Do not use the unit price.
+
+Do not use VAT.
+
+Do not use discounts unless the receipt clearly shows that the
+discounted value is the final item price.
+
+QUANTITY:
+
+Use the quantity when explicitly shown.
+
+If there is no reliable quantity information for an item,
+use 1.
+
+TOTAL:
+
+Extract the value associated with:
+
+ОБЩА СУМА ЛВ
+
+Do not calculate the total yourself.
+
+============================================================
+OCR TEXT
+============================================================
+
+%s
+
+============================================================
+
+Return ONLY valid JSON.
+
+Use exactly:
+
+{
+  "store": "string",
+  "date": "YYYY-MM-DD",
+  "items": [
+    {
+      "name": "string",
+      "quantity": 1,
+      "price": 0.00
+    }
+  ],
+  "total": 0.00
+}
+
+Do not use Markdown.
+Do not use triple backticks.
+Do not include explanations.
+`, ocrText)
+
+	jsonFormat := json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"store": {
+				"type": "string"
+			},
+			"date": {
+				"type": "string"
+			},
+			"items": {
+				"type": "array",
+				"items": {
+					"type": "object",
+					"properties": {
+						"name": {
+							"type": "string"
+						},
+						"quantity": {
+							"type": "integer"
+						},
+						"price": {
+							"type": "number"
+						}
+					},
+					"required": ["name", "quantity", "price"]
+				}
+			},
+			"total": {
+				"type": "number"
+			}
+		},
+		"required": ["store", "date", "items", "total"]
+	}`)
+
+	jsonResponse, err := callOllamaText(
+		"qwen2.5vl-receipt",
+		structurePrompt,
+		jsonFormat,
+	)
+
+	if err != nil {
+		return Receipt{}, fmt.Errorf("structure pass failed: %w", err)
+	}
+
+	fmt.Println()
+	fmt.Println("===== STRUCTURED RESPONSE =====")
+	fmt.Println(jsonResponse)
+	fmt.Println("================================")
+
+	cleanedJSON, err := extractJSON(jsonResponse)
+	if err != nil {
+		return Receipt{}, fmt.Errorf(
+			"could not extract JSON from model response: %w",
+			err,
+		)
+	}
+
+	var receipt Receipt
+
+	err = json.Unmarshal([]byte(cleanedJSON), &receipt)
+	if err != nil {
+		return Receipt{}, fmt.Errorf(
+			"model returned invalid JSON: %w\nJSON: %s",
+			err,
+			cleanedJSON,
+		)
+	}
+
+	return receipt, nil
+}
+
+// ============================================
+// OLLAMA COMMUNICATION
+// ============================================
+
+func callOllamaVision(
+	model string,
+	prompt string,
+	imageBase64 string,
+) (string, error) {
+
+	requestBody := OllamaRequest{
+		Model:  model,
+		Stream: false,
+		Messages: []Message{
+			{
+				Role:    "user",
+				Content: prompt,
+				Images:  []string{imageBase64},
+			},
+		},
+	}
+
+	jsonData, err := json.Marshal(requestBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to create vision request: %w", err)
+	}
+
+	fmt.Println("Sending image to Ollama for OCR...")
+
+	resp, err := http.Post(
+		"http://localhost:11434/api/chat",
+		"application/json",
+		bytes.NewBuffer(jsonData),
+	)
+
+	if err != nil {
+		return "", fmt.Errorf("failed to connect to Ollama: %w", err)
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+
+		return "", fmt.Errorf(
+			"Ollama returned HTTP %d: %s",
+			resp.StatusCode,
+			string(body),
+		)
+	}
+
+	responseData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read Ollama response: %w", err)
+	}
+
+	var ollamaResponse OllamaResponse
+
+	err = json.Unmarshal(responseData, &ollamaResponse)
+	if err != nil {
+		return "", fmt.Errorf(
+			"failed to parse Ollama response: %w\nResponse: %s",
+			err,
+			string(responseData),
+		)
+	}
+
+	return ollamaResponse.Message.Content, nil
+}
+
+func callOllamaText(
+	model string,
+	prompt string,
+	format json.RawMessage,
+) (string, error) {
+
+	requestBody := OllamaRequest{
+		Model:  model,
+		Stream: false,
+		Format: format,
+		Messages: []Message{
+			{
+				Role:    "user",
+				Content: prompt,
+			},
+		},
+	}
+
+	jsonData, err := json.Marshal(requestBody)
+	if err != nil {
+		return "", fmt.Errorf("failed to create text request: %w", err)
+	}
+
+	fmt.Println("Sending OCR text to Ollama for structuring...")
+
+	resp, err := http.Post(
+		"http://localhost:11434/api/chat",
+		"application/json",
+		bytes.NewBuffer(jsonData),
+	)
+
+	if err != nil {
+		return "", fmt.Errorf("failed to connect to Ollama: %w", err)
+	}
+
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+
+		return "", fmt.Errorf(
+			"Ollama returned HTTP %d: %s",
+			resp.StatusCode,
+			string(body),
+		)
+	}
+
+	responseData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read Ollama response: %w", err)
+	}
+
+	var ollamaResponse OllamaResponse
+
+	err = json.Unmarshal(responseData, &ollamaResponse)
+	if err != nil {
+		return "", fmt.Errorf(
+			"failed to parse Ollama response: %w\nResponse: %s",
+			err,
+			string(responseData),
+		)
+	}
+
+	return ollamaResponse.Message.Content, nil
+}
+
+// ============================================
+// JSON EXTRACTION
+// ============================================
+
+func extractJSON(text string) (string, error) {
+	text = strings.TrimSpace(text)
+
+	if json.Valid([]byte(text)) {
+		return text, nil
+	}
+
+	if strings.Contains(text, "```") {
+		parts := strings.Split(text, "```")
+
+		for _, part := range parts {
+			part = strings.TrimSpace(part)
+
+			if strings.HasPrefix(strings.ToLower(part), "json") {
+				part = strings.TrimSpace(part[4:])
+			}
+
+			if json.Valid([]byte(part)) {
+				return part, nil
+			}
+		}
+	}
+
+	start := strings.Index(text, "{")
+	end := strings.LastIndex(text, "}")
+
+	if start >= 0 && end > start {
+		candidate := strings.TrimSpace(text[start : end+1])
+
+		if json.Valid([]byte(candidate)) {
+			return candidate, nil
+		}
+	}
+
+	return "", fmt.Errorf("no valid JSON object found in model response")
+}
+
+// ============================================
+// MAIN
+// ============================================
+
+func main() {
+	// Check if running as CLI or server
+	if len(os.Args) > 1 && os.Args[1] == "--cli" {
+		runCLI()
+		return
+	}
+
+	port := os.Getenv("PORT")
+
+	if port == "" {
+		port = "8080"
+	}
+
+	http.HandleFunc("/api/receipt", receiptHandler)
+	http.HandleFunc("/health", healthHandler)
+
+	fmt.Printf("=== Receipt Scanner API Server ===\n")
+	fmt.Printf("Server starting on http://0.0.0.0:%s\n", port)
+
+	fmt.Printf("Endpoints:\n")
+	fmt.Printf("  POST /api/receipt  - Send raw JPEG binary for processing\n")
+	fmt.Printf("  GET  /health       - Health check\n")
+
+	fmt.Printf("\nTest with curl:\n")
+	fmt.Printf(
+		"  curl -X POST -H \"Content-Type: image/jpeg\" --data-binary @test.jpg http://localhost:%s/api/receipt\n",
+		port,
+	)
+
+	fmt.Printf("================================\n")
+
+	err := http.ListenAndServe(":"+port, nil)
+
+	if err != nil {
+		fmt.Printf("Server error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// ============================================
+// CLI MODE (FOR TESTING)
+// ============================================
+
+func runCLI() {
+	fmt.Println("=== Receipt Scanner CLI Mode ===")
+
+	imageFolder := "./"
+
+	if len(os.Args) > 2 {
+		imageFolder = os.Args[2]
+	}
+
+	imagePath, err := findImage(imageFolder)
+	if err != nil {
+		fmt.Println("Error finding image:", err)
+		return
+	}
+
+	fmt.Println("Found image:", imagePath)
+
+	imageData, err := os.ReadFile(imagePath)
+	if err != nil {
+		fmt.Println("Error reading image:", err)
+		return
+	}
+
+	fmt.Printf("Image size: %d bytes\n", len(imageData))
+
+	receipt, err := processReceipt(imageData)
+	if err != nil {
+		fmt.Println("Error processing receipt:", err)
+		return
+	}
+
+	// Save receipt in CLI mode too
+	path, err := saveReceipt(receipt)
+
+	if err != nil {
+		fmt.Printf("Warning: Could not save receipt: %v\n", err)
+	} else {
+		fmt.Printf("Receipt saved to: %s\n", path)
+	}
+
+	fmt.Println()
+	fmt.Println("===== RECEIPT =====")
+
+	fmt.Printf("Store: %s\n", receipt.Store)
+	fmt.Printf("Date:  %s\n", receipt.Date)
+
+	fmt.Println("Items:")
+
+	for _, item := range receipt.Items {
+		fmt.Printf(
+			"  %dx %s - %.2f\n",
+			item.Quantity,
+			item.Name,
+			item.Price,
+		)
+	}
+
+	fmt.Printf("Total: %.2f\n", receipt.Total)
+	fmt.Println("===================")
+}
+
+func findImage(folder string) (string, error) {
+	entries, err := os.ReadDir(folder)
+
+	if err != nil {
+		return "", err
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		ext := strings.ToLower(filepath.Ext(entry.Name()))
+
+		if ext == ".jpg" || ext == ".jpeg" {
+			return filepath.Join(folder, entry.Name()), nil
+		}
+	}
+
+	return "", fmt.Errorf("no JPEG image found in %s", folder)
+}
