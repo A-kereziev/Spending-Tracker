@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="bg">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>BillSnap</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="app.js" defer></script>
+</head>
+<body>
+    <aside>
+        <a class="brand" href="#dashboard">Bill<span>Snap</span></a>
+        <p class="muted">Лични финанси</p>
+
+        <nav>
+            <button data-view="dashboard">Табло за разходи</button>
+            <button data-view="receipts">Касови бележки</button>
+            <button data-view="prices">Анализ на цени</button>
+        </nav>
+
+        <p class="side-note">ESP32-S3 / Go / OCR</p>
+    </aside>
+
+    <main>
+        <header>
+            <div>
+                <p class="eyebrow">BILLSNAP / ФИНАНСИ</p>
+                <h1 id="title">Табло за разходи</h1>
+                <p id="status" role="status">Зареждане…</p>
+            </div>
+
+            <div class="actions">
+                <button id="refresh">Обнови</button>
+                <button id="export">Експорт JSON</button>
+            </div>
+        </header>
+
+        <!-- DASHBOARD -->
+
+        <section id="dashboard">
+            <div class="toolbar">
+                <label>
+                    Период
+                    <select id="period"></select>
+                </label>
+
+                <label>
+                    Месечен бюджет
+                    <input
+                        id="budget"
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        placeholder="Без лимит"
+                    >
+                </label>
+            </div>
+
+            <div class="metrics">
+                <article>
+                    <h2>Общо разходи</h2>
+                    <strong id="total">—</strong>
+                </article>
+
+                <article>
+                    <h2>Касови бележки</h2>
+                    <strong id="count">—</strong>
+                </article>
+
+                <article>
+                    <h2>Средна покупка</h2>
+                    <strong id="average">—</strong>
+                </article>
+
+                <article>
+                    <h2>Месечен бюджет</h2>
+                    <strong id="budget-text">—</strong>
+                    <progress
+                        id="budget-bar"
+                        max="100"
+                        value="0"
+                    ></progress>
+                </article>
+            </div>
+
+            <div class="columns">
+                <article>
+                    <h2>Разходи по дати</h2>
+                    <div id="timeline" class="bars"></div>
+                </article>
+
+                <article>
+                    <h2>Разходи по търговци</h2>
+                    <div id="stores" class="bars"></div>
+                </article>
+            </div>
+
+            <article>
+                <h2>Последни бележки</h2>
+
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Магазин</th>
+                                <th>Дата</th>
+                                <th>Артикули</th>
+                                <th>Сума</th>
+                            </tr>
+                        </thead>
+
+                        <tbody id="recent"></tbody>
+                    </table>
+                </div>
+            </article>
+        </section>
+
+        <!-- RECEIPTS -->
+
+        <section id="receipts" hidden>
+            <div class="toolbar">
+                <input
+                    id="search"
+                    type="search"
+                    placeholder="Магазин или артикул"
+                    aria-label="Търсене"
+                >
+
+                <select
+                    id="month"
+                    aria-label="Месец"
+                ></select>
+
+                <select id="sort" aria-label="Подреждане">
+                    <option value="new">Най-нови</option>
+                    <option value="old">Най-стари</option>
+                    <option value="high">Най-висока сума</option>
+                </select>
+            </div>
+
+            <div class="columns">
+                <article>
+                    <h2>Бележки</h2>
+                    <div id="receipt-list"></div>
+                </article>
+
+                <article>
+                    <h2>Детайли</h2>
+
+                    <div id="detail">
+                        Изберете бележка.
+                    </div>
+
+                    <details id="raw-box" hidden>
+                        <summary>Оригинален JSON</summary>
+                        <pre id="raw"></pre>
+                    </details>
+                </article>
+            </div>
+        </section>
+
+        <!-- PRICE ANALYSIS -->
+
+        <section id="prices" hidden>
+            <article>
+                <h2>История на цените</h2>
+
+                <p class="muted">
+                    Данни от сканираните бележки, без автоматично
+                    обединяване на различни продукти.
+                </p>
+
+                <input
+                    id="product-search"
+                    type="search"
+                    placeholder="Търси артикул"
+                    aria-label="Търси артикул"
+                >
+
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Артикул</th>
+                                <th>Магазин</th>
+                                <th>Дата</th>
+                                <th>Количество</th>
+                                <th>Ед. цена</th>
+                                <th>Общо</th>
+                            </tr>
+                        </thead>
+
+                        <tbody id="products"></tbody>
+                    </table>
+                </div>
+            </article>
+        </section>
+
+        <footer>
+            BillSnap — ПМГ „Яне Сандански“, Гоце Делчев
+        </footer>
+    </main>
+</body>
+</html>

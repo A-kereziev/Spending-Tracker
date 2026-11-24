@@ -12,6 +12,10 @@ import (
 )
 
 func main() {
+	if err := startDashboard(); err != nil {
+		log.Fatal(err)
+	}
+
 	mux := chi.NewRouter()
 	mux.Use(middleware.Logger)
 
@@ -27,7 +31,7 @@ func main() {
 		Handler:           mux,
 		ReadTimeout:       time.Second * 2,
 		ReadHeaderTimeout: time.Second * 2,
-		WriteTimeout:      time.Second * 2,
+		WriteTimeout:      5 * time.Minute,
 		IdleTimeout:       0,
 		MaxHeaderBytes:    0,
 		TLSNextProto:      map[string]func(*http.Server, *tls.Conn, http.Handler){},
