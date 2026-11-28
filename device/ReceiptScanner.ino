@@ -25,9 +25,9 @@ static OV5640 autofocus;
 // =============================================
 
 #define CAMERA_XCLK 10000000
-#define CAMERA_JPEG_QUALITY 6
-#define CAMERA_FRAME_SIZE FRAMESIZE_UXGA
-#define CAMERA_FALLBACK_SIZE FRAMESIZE_SXGA
+#define CAMERA_JPEG_QUALITY 4
+#define CAMERA_FRAME_SIZE FRAMESIZE_QSXGA
+#define CAMERA_FALLBACK_SIZE FRAMESIZE_QXGA
 #define CAMERA_CAPTURE_ATTEMPTS 1
 
 // =============================================
@@ -72,7 +72,7 @@ static OV5640 autofocus;
 #define LEDC_FREQ 5000
 #define LEDC_TIMER_10_BIT 10
 
-#define EXAMPLE_LCD_ROTATION 0
+#define EXAMPLE_LCD_ROTATION 2
 #define EXAMPLE_LCD_H_RES 240
 #define EXAMPLE_LCD_V_RES 320
 
@@ -713,7 +713,7 @@ void lvgl_camera_ui_init(lv_obj_t *parent) {
   lv_obj_set_style_bg_color(parent, lv_color_hex(0x101820), 0);
 
   lv_obj_t *title = lv_label_create(parent);
-  lv_label_set_text(title, "RECEIPT SCANNER");
+  lv_label_set_text(title, "BillSnap");
   lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), 0);
   lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 18);
 
@@ -761,35 +761,129 @@ void lvgl_camera_ui_init(lv_obj_t *parent) {
 
 void configure_sensor(sensor_t *s) {
   if (!s) return;
+
   Serial.printf("Camera PID: 0x%04X\n", s->id.PID);
+
   if (s->id.PID != OV5640_PID) {
     Serial.println("WARNING: OV5640 not detected.");
     return;
   }
-  s->set_vflip(s, 1);
-  s->set_hmirror(s, 0);
-  s->set_brightness(s, 0);
-  s->set_contrast(s, 1);
-  s->set_saturation(s, -1);
-  if (s->set_sharpness) s->set_sharpness(s, 2);
+
+  // Image orientation
+  s->set_vflip(s, 0);
+  s->set_hmirror(s, 1);
+
+  // Image quality
+  s->set_brightness(s, 2);
+  s->set_contrast(s, 2);
+  s->set_saturation(s, -2);
+
+  if (s->set_sharpness)
+    s->set_sharpness(s, 2);
+
+  // Automatic white balance
   s->set_whitebal(s, 1);
+
+  if (s->set_awb_gain)
+    s->set_awb_gain(s, 1);
+
+  // Automatic exposure
   s->set_exposure_ctrl(s, 1);
+
+  if (s->set_aec2)
+    s->set_aec2(s, 1);
+
+  if (s->set_ae_level)
+    s->set_ae_level(s, 2);
+
+  // Automatic gain
   s->set_gain_ctrl(s, 1);
+
+  if (s->set_gainceiling)
+    s->set_gainceiling(s, GAINCEILING_4X);
+
+  // Bad pixel correction
+  if (s->set_bpc)
+    s->set_bpc(s, 1);
+
+  // White pixel correction
+  if (s->set_wpc)
+    s->set_wpc(s, 1);
+
+  // Gamma correction
+  if (s->set_raw_gma)
+    s->set_raw_gma(s, 1);
+
+  // Lens correction
+  if (s->set_lenc)
+    s->set_lenc(s, 1);
+
+  Serial.println("[CAM] Sensor configuration complete.");
 }
 
-void init_autofocus(sensor_t *s) {
+bool init_autofocus(sensor_t *s) {
 #if ENABLE_AUTOFOCUS
-  if (!s || s->id.PID != OV5640_PID) return;
-  autofocus.start(s);
+
+  if (!s || s->id.PID != OV5640_PID)
+    return false;
+
+  if (!autofocus.start(s))
+    return false;
+
   if (autofocus.focusInit() != 0) {
-    Serial.println("[AF] Firmware initialization failed; continuing capture.");
-    return;
+    Serial.println("[AF] Firmware initialization failed.");
+    return false;
   }
-  if (autofocus.autoFocusMode() != 0) {
-    Serial.println("[AF] Mode initialization failed; continuing capture.");
-    return;
+
+  // Request single-shot autofocus.
+  if (s->set_reg(s, 0x3023, 0xFF, 0x01) != 0)
+    return false;
+
+  if (s->set_reg(s, 0x3022, 0xFF, 0x03) != 0)
+    return false;
+
+  Serial.println("[AF] Single-shot autofocus requested.");
+
+  return true;
+
+#else
+  return false;
+#endif
+}
+
+bool wait_for_autofocus(uint32_t timeout_ms) {
+#if ENABLE_AUTOFOCUS
+
+  uint32_t start = millis();
+
+  while (millis() - start < timeout_ms) {
+
+    // Keep fresh frames flowing during autofocus.
+    camera_fb_t *fb = esp_camera_fb_get();
+
+    if (fb) {
+      esp_camera_fb_return(fb);
+    }
+
+    uint8_t status = autofocus.getFWStatus();
+
+    if (status == FW_STATUS_S_FOCUSED) {
+      Serial.println("[AF] Focus achieved!");
+      return true;
+    }
+
+    if (status == 0xFF) {
+      return false;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(50));
   }
-  Serial.println("[AF] Continuous autofocus enabled.");
+
+  Serial.println("[AF] Focus timeout.");
+  return false;
+
+#else
+  return false;
 #endif
 }
 
@@ -896,7 +990,11 @@ bool init_camera(framesize_t frame_size) {
     config.fb_count
   );
 
-  if (frame_size == FRAMESIZE_UXGA) {
+  if (frame_size == FRAMESIZE_QSXGA) {
+    Serial.println("Resolution: QSXGA (2592x1944)");
+  } else if (frame_size == FRAMESIZE_QXGA) {
+    Serial.println("Resolution: QXGA (2048x1536)");
+  } else if (frame_size == FRAMESIZE_UXGA) {
     Serial.println(
       "Resolution: UXGA (1600x1200)"
     );
@@ -946,10 +1044,21 @@ bool init_camera(framesize_t frame_size) {
   }
 
   configure_sensor(s);
-  init_autofocus(s);
 
-  // Allow autofocus and automatic exposure to settle.
-  vTaskDelay(pdMS_TO_TICKS(2000));
+  #if ENABLE_AUTOFOCUS
+
+    if (init_autofocus(s)) {
+      if (!wait_for_autofocus(2000)) {
+        Serial.println("[AF] Focus unconfirmed. Continuing.");
+      }
+    } else {
+      Serial.println("[AF] Initialization failed. Continuing.");
+    }
+
+  #else
+
+    vTaskDelay(pdMS_TO_TICKS(1000));
+  #endif
 
   // Discard the first queued frame, which may predate focus.
   camera_fb_t *warmup = esp_camera_fb_get();
@@ -1236,7 +1345,7 @@ void setup() {
   }
 
   Serial.println(
-    "\n=== ESP32-S3 Touch LCD Camera Scanner ==="
+    "\n=== BillSnap | ESP32-S3 Receipt Scanner ==="
   );
 
   Serial.printf(

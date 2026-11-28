@@ -18,8 +18,8 @@ const number = v =>
         ? null
         : Number(v);
 
-const money = (v, c = 'BGN') =>
-    v === null ? '—' : `${v.toFixed(2)} ${c}`;
+const money = (v, c = 'EUR') =>
+    v === null ? '—' : `${v.toFixed(2)} ${c === 'EUR' ? '€' : c}`;
 
 const text = (id, v) => $(id).textContent = v;
 
