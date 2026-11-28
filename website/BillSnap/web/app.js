@@ -437,7 +437,7 @@ async function load() {
     busy = true;
 
     try {
-        const res = await fetch('/api/receipts', {
+        const res = await fetch('http://localhost:8080/api/receipt', {
             cache: 'no-store'
         });
 

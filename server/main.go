@@ -12,12 +12,32 @@ import (
 )
 
 func main() {
-	if err := startDashboard(); err != nil {
-		log.Fatal(err)
-	}
-
 	mux := chi.NewRouter()
 	mux.Use(middleware.Logger)
+	mux.Use(CORS(CORSConfig{
+		AllowedOrigins: []string{
+			"*",
+		},
+		AllowedMethods: []string{
+			"GET",
+			"POST",
+			"PUT",
+			"PATCH",
+			"DELETE",
+			"OPTIONS",
+		},
+		AllowedHeaders: []string{
+			"Accept",
+			"Authorization",
+			"Content-Type",
+			"X-Request-ID",
+		},
+		ExposedHeaders: []string{
+			"X-Request-ID",
+		},
+		AllowCredentials: true,
+		MaxAge:           300,
+	}))
 
 	ollamaSvc := NewOllamaService()
 	receiptHandler := NewReceiptHandler(ollamaSvc)
@@ -25,6 +45,7 @@ func main() {
 
 	mux.Get("/health", healtCheck.Handle)
 	mux.Post("/api/receipt", receiptHandler.Handle)
+	mux.Get("/api/receipt", receiptHandler.HandleGet)
 
 	svr := http.Server{
 		Addr:              "0.0.0.0:8080",
